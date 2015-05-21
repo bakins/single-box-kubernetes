@@ -36,6 +36,11 @@ if [ ! -f /opt/kubernetes-<%= $kubernetes_version %>/bin/kubelet ]; then
   popd
 fi
 
+cat <<EOF > /etc/hosts
+127.0.0.1 localhost.localdomain localhost
+<%= $ip %> <%= $hostname %>
+EOF
+
 cat <<'EOF' > /opt/bin/wupiao
 #!/bin/bash
 # based on  https://github.com/pires/kubernetes-vagrant-coreos-cluster
@@ -169,7 +174,8 @@ ExecStart=/opt/bin/kubelet \
   --allow-privileged=true \
   --logtostderr=true \
   --v=2 \
-  --api-servers=http://127.0.0.1:8080
+  --api-servers=http://127.0.0.1:8080 \
+  --hostname-override=<%= $ip %>
 Restart=on-failure
 RestartSec=5
 
@@ -184,16 +190,13 @@ cat <<EOF > /tmp/node.json
   "kind": "Node",
   "apiVersion": "v1beta3",
   "metadata": {
-    "name": "<%= $hostname %>"
-  },
-  "spec": {
-    "externalID": "<%= $ip %>"
+    "name": "<%= $ip %>"
   }
 }
 EOF
 
 
 /opt/bin/wupiao http://127.0.0.1:8080/api/v1beta3/nodes
-if [ -z `kubectl get nodes  -o template -t \$'{{range.items}}{{.metadata.name}}\n{{end}}' | grep <%= $hostname %>` ]; then
+if [ -z `kubectl get nodes  -o template -t \$'{{range.items}}{{.metadata.name}}\n{{end}}' | grep <%= $ip %>` ]; then
   kubectl create -f /tmp/node.json
 fi

@@ -31,7 +31,7 @@ kubectl config use-context coreos
 kubectl get nodes
 ```
 
-You should see a node named `coreos-k8s`.
+You should see the node with its IP as the name.
 
 ## Customization
 
@@ -49,6 +49,7 @@ This assumes your host can talk directly to the virtual machine, which is the de
 
 - https
 - User authentication.
+- name for kubelet node?
 
 ## Acknowlegements
 
