@@ -1,0 +1,199 @@
+#!/bin/bash
+set -e
+set -x
+
+start() {
+  systemctl daemon-reload
+  systemctl enable ${1}.service
+  systemctl start ${1}.service
+}
+
+start etcd2
+
+if [ ! -f /opt/kubernetes-<%= $kubernetes_version %>/bin/kubelet ]; then
+  pushd /tmp
+
+  if [ ! -f kubernetes-<%= $kubernetes_version %>.tar.gz ]; then
+    curl -o kubernetes-<%= $kubernetes_version %>.tar.gz -L -s https://github.com/GoogleCloudPlatform/kubernetes/releases/download/v<%= $kubernetes_version %>/kubernetes.tar.gz
+  fi
+
+  if [ -d kubernetes ]; then
+    rm -rf kubernetes
+  fi
+
+  tar -zxf kubernetes-<%= $kubernetes_version %>.tar.gz
+  mkdir -p /opt/kubernetes-<%= $kubernetes_version %>
+  tar -C /opt/kubernetes-<%= $kubernetes_version %> --strip-components=2 -zxf kubernetes/server/kubernetes-server-linux-amd64.tar.gz
+  rm /opt/kubernetes-<%= $kubernetes_version %>/bin/*.tar
+  rm /opt/kubernetes-<%= $kubernetes_version %>/bin/*.docker_tag
+
+  chmod -R 755 /opt/kubernetes-<%= $kubernetes_version %>/bin
+
+  mkdir -p /opt/bin
+  for P in /opt/kubernetes-<%= $kubernetes_version %>/bin/*; do
+    ln -sf $P /opt/bin/
+  done
+  popd
+fi
+
+cat <<'EOF' > /opt/bin/wupiao
+#!/bin/bash
+# based on  https://github.com/pires/kubernetes-vagrant-coreos-cluster
+# [w]ait [u]ntil [p]ort [i]s [a]ctually [o]pen
+[ -n "$1" ] && until curl -o /dev/null -sf ${1}; do sleep 1 && echo .; done;
+exit $?
+EOF
+
+chmod +x /opt/bin/wupiao
+
+/opt/bin/wupiao http://127.0.0.1:2379/v2/members
+
+mkdir -p /etc/systemd/system/flanneld.service.d
+cat <<EOF > /etc/systemd/system/flanneld.service.d/50-network-config.conf
+[Unit]
+Requires=etcd2.service
+After=etcd2.service
+
+[Service]
+ExecStartPre=/opt/bin/wupiao http://127.0.0.1:2379/v2/members
+ExecStartPre=/usr/bin/etcdctl --no-sync set /coreos.com/network/config '{ "Network": "<%= $cluster_cidr %>", "Backend":{"Type": "vxlan"} }'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+start flanneld
+start docker
+
+cat <<EOF > /etc/systemd/system/kube-apiserver.service
+[Unit]
+Description=Kubernetes API Server
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+
+[Service]
+ExecStartPre=/opt/bin/wupiao http://127.0.0.1:2379/v2/members
+ExecStart=/opt/bin/kube-apiserver \
+  --insecure-bind-address=0.0.0.0 \
+  --allow-privileged=true \
+  --etcd-servers=http://127.0.0.1:2379 \
+  --logtostderr=true \
+  --insecure-port=8080 \
+  --v=2 \
+  --portal-net=<%= $portal_net %>
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+start kube-apiserver
+
+cat <<EOF > /etc/systemd/system/kube-scheduler.service
+[Unit]
+Description=Kubernetes Scheduler
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+Requires=kube-apiserver.service
+After=kube-apiserver.service
+
+[Service]
+ExecStartPre=/opt/bin/wupiao http://127.0.0.1:8080/api/v1beta3/nodes
+ExecStart=/opt/bin/kube-scheduler \
+  --logtostderr=true \
+  --master=http://127.0.0.1:8080 \
+  --v=2
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+start kube-scheduler
+
+cat <<EOF > /etc/systemd/system/kube-controller-manager.service
+[Unit]
+Description=Kubernetes Controller Manager
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+Requires=kube-apiserver.service
+After=kube-apiserver.service
+
+[Service]
+ExecStartPre=/opt/bin/wupiao http://127.0.0.1:8080/api/v1beta3/nodes
+ExecStart=/opt/bin/kube-controller-manager \
+  --logtostderr=true \
+  --master=http://127.0.0.1:8080 \
+  --v=2 \
+  --cluster-cidr=<%= $cluster_cidr %>
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+start kube-controller-manager
+
+cat <<EOF > /etc/systemd/system/kube-proxy.service
+[Unit]
+Description=Kubernetes Proxy
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+Requires=kube-apiserver.service
+After=kube-apiserver.service
+
+[Service]
+ExecStartPre=/opt/bin/wupiao http://127.0.0.1:8080/api/v1beta3/nodes
+ExecStart=/opt/bin/kube-proxy \
+  --logtostderr=true \
+  --master=http://127.0.0.1:8080 \
+  --v=2
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+start kube-proxy
+
+cat <<EOF > /etc/systemd/system/kube-kubelet.service
+[Unit]
+Description=Kubernetes Kubelet
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+Requires=docker.service kube-apiserver.service
+After=docker.service kube-apiserver.service
+
+[Service]
+ExecStartPre=/opt/bin/wupiao http://127.0.0.1:8080/api/v1beta3/nodes
+ExecStart=/opt/bin/kubelet \
+  --allow-privileged=true \
+  --logtostderr=true \
+  --v=2 \
+  --api-servers=http://127.0.0.1:8080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+start kube-kubelet
+
+cat <<EOF > /tmp/node.json
+{
+  "kind": "Node",
+  "apiVersion": "v1beta3",
+  "metadata": {
+    "name": "<%= $hostname %>"
+  },
+  "spec": {
+    "externalID": "<%= $ip %>"
+  }
+}
+EOF
+
+
+/opt/bin/wupiao http://127.0.0.1:8080/api/v1beta3/nodes
+if [ -z `kubectl get nodes  -o template -t \$'{{range.items}}{{.metadata.name}}\n{{end}}' | grep <%= $hostname %>` ]; then
+  kubectl create -f /tmp/node.json
+fi
